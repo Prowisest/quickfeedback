@@ -1,13 +1,15 @@
 -- ============================================================
 -- PROWETOK Database Schema & RLS Setup for Supabase
 -- ============================================================
+-- Run this entire script in Supabase Dashboard -> SQL Editor -> New Query -> Run
 
--- 1. Enable UUID extension if not already enabled
+-- 1. Enable UUID Extension (built into Postgres)
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- 2. Create the "businesses" table
 CREATE TABLE IF NOT EXISTS public.businesses (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     email TEXT NOT NULL,
@@ -16,7 +18,7 @@ CREATE TABLE IF NOT EXISTS public.businesses (
 
 -- 3. Create the "feedback" table
 CREATE TABLE IF NOT EXISTS public.feedback (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     business_id UUID NOT NULL REFERENCES public.businesses(id) ON DELETE CASCADE,
     customer_name TEXT,
     rating SMALLINT NOT NULL CHECK (rating >= 1 AND rating <= 5),
@@ -24,16 +26,20 @@ CREATE TABLE IF NOT EXISTS public.feedback (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
--- 4. Create Indexes for performant queries
+-- 4. Create Indexes for fast querying
 CREATE INDEX IF NOT EXISTS idx_businesses_user_id ON public.businesses(user_id);
+CREATE INDEX IF NOT EXISTS idx_businesses_email ON public.businesses(email);
 CREATE INDEX IF NOT EXISTS idx_feedback_business_id ON public.feedback(business_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_created_at ON public.feedback(created_at DESC);
+
+-- 5. Grant API permissions to Supabase roles
+GRANT ALL ON TABLE public.businesses TO anon, authenticated, service_role;
+GRANT ALL ON TABLE public.feedback TO anon, authenticated, service_role;
 
 -- ============================================================
 -- ROW LEVEL SECURITY (RLS) POLICIES
 -- ============================================================
 
--- Enable RLS on both tables
 ALTER TABLE public.businesses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.feedback ENABLE ROW LEVEL SECURITY;
 
@@ -54,6 +60,7 @@ DROP POLICY IF EXISTS "Users can insert their own business" ON public.businesses
 CREATE POLICY "Users can insert their own business"
     ON public.businesses
     FOR INSERT
+    TO authenticated
     WITH CHECK (auth.uid() = user_id);
 
 -- Allow authenticated users to update their own business profile
@@ -61,6 +68,7 @@ DROP POLICY IF EXISTS "Users can update their own business" ON public.businesses
 CREATE POLICY "Users can update their own business"
     ON public.businesses
     FOR UPDATE
+    TO authenticated
     USING (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
 
@@ -73,8 +81,8 @@ DROP POLICY IF EXISTS "Public can insert feedback" ON public.feedback;
 CREATE POLICY "Public can insert feedback"
     ON public.feedback
     FOR INSERT
+    TO anon, authenticated
     WITH CHECK (
-        -- Verify business_id exists in businesses table
         EXISTS (
             SELECT 1 FROM public.businesses
             WHERE public.businesses.id = feedback.business_id
@@ -86,6 +94,7 @@ DROP POLICY IF EXISTS "Business owners can view their feedback" ON public.feedba
 CREATE POLICY "Business owners can view their feedback"
     ON public.feedback
     FOR SELECT
+    TO authenticated
     USING (
         EXISTS (
             SELECT 1 FROM public.businesses
@@ -99,6 +108,7 @@ DROP POLICY IF EXISTS "Business owners can delete their feedback" ON public.feed
 CREATE POLICY "Business owners can delete their feedback"
     ON public.feedback
     FOR DELETE
+    TO authenticated
     USING (
         EXISTS (
             SELECT 1 FROM public.businesses
@@ -112,7 +122,11 @@ CREATE POLICY "Business owners can delete their feedback"
 -- ============================================================
 
 CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 BEGIN
     INSERT INTO public.businesses (user_id, name, email)
     VALUES (
@@ -122,7 +136,7 @@ BEGIN
     );
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$;
 
 -- Trigger the function whenever a new user is created in auth.users
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
@@ -131,25 +145,12 @@ CREATE TRIGGER on_auth_user_created
     FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
 -- ============================================================
--- OPTIONAL SAMPLE SEED DATA FOR TESTING (Demo Business)
+-- BACKFILL: Create business profiles for any existing users
 -- ============================================================
--- Uncomment below if you want sample data right away:
-/*
-DO $$
-DECLARE
-    demo_biz_id UUID := 'a0000000-0000-0000-0000-000000000001';
-BEGIN
-    INSERT INTO public.businesses (id, name, email)
-    VALUES (demo_biz_id, 'Artisan Coffee Roasters', 'owner@artisancoffee.demo')
-    ON CONFLICT (id) DO NOTHING;
-
-    INSERT INTO public.feedback (business_id, customer_name, rating, comment, created_at)
-    VALUES
-        (demo_biz_id, 'Sarah Jenkins', 5, 'The oat milk latte and almond croissant were divine! Best coffee spot in town.', NOW() - INTERVAL '2 hours'),
-        (demo_biz_id, 'Michael Chang', 5, 'Super friendly staff and very fast service even during the morning rush.', NOW() - INTERVAL '6 hours'),
-        (demo_biz_id, 'Emily Watson', 4, 'Great espresso blend. Would love more vegan pastry options on weekdays!', NOW() - INTERVAL '1 day'),
-        (demo_biz_id, 'David K.', 3, 'Good coffee, but seating was quite limited around 11am.', NOW() - INTERVAL '2 days'),
-        (demo_biz_id, 'Anonymous', 5, 'Love the loyalty card program and the relaxing background playlist.', NOW() - INTERVAL '3 days')
-    ON CONFLICT DO NOTHING;
-END $$;
-*/
+INSERT INTO public.businesses (user_id, name, email)
+SELECT
+    id,
+    COALESCE(raw_user_meta_data->>'business_name', split_part(email, '@', 1)),
+    email
+FROM auth.users
+WHERE id NOT IN (SELECT user_id FROM public.businesses WHERE user_id IS NOT NULL);
