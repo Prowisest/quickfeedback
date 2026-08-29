@@ -19,6 +19,7 @@ import {
   Inbox,
 } from 'lucide-react';
 import { FeedbackService } from '@/lib/feedback-service';
+import { createClient, isSupabaseConfigured } from '@/lib/supabase/client';
 import { Business, Feedback, FeedbackStats } from '@/lib/types';
 import { formatDate } from '@/lib/utils';
 import Navbar from '@/components/Navbar';
@@ -79,7 +80,26 @@ export default function DashboardPage() {
   };
 
   useEffect(() => {
+    let isMounted = true;
     loadDashboardData();
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createClient();
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+          if (isMounted && session?.user) {
+            loadDashboardData();
+          }
+        });
+
+        return () => {
+          isMounted = false;
+          subscription.unsubscribe();
+        };
+      } catch {
+        // ignore
+      }
+    }
   }, []);
 
   const handleSaveBusinessName = async () => {

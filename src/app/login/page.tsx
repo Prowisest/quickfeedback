@@ -47,9 +47,11 @@ export default function LoginPage() {
     setLoading(true);
     setErrorMessage(null);
     try {
-      await FeedbackService.signIn('owner@artisancoffee.demo', 'demo-password');
-      router.push('/dashboard');
-      router.refresh();
+      const res = await FeedbackService.signInDemo();
+      if (res.success) {
+        router.push('/dashboard');
+        router.refresh();
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Demo login failed';
       setErrorMessage(message);

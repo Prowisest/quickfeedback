@@ -1,9 +1,9 @@
 import { createClient, isSupabaseConfigured } from './supabase/client';
 import { Business, Feedback, FeedbackStats } from './types';
 
-// Default Demo Businesses for instant offline testing
-const DEMO_BUSINESS_ID = 'a0000000-0000-0000-0000-000000000001';
-const DEMO_BUSINESS: Business = {
+// Default Demo Businesses for instant testing
+export const DEMO_BUSINESS_ID = 'a0000000-0000-0000-0000-000000000001';
+export const DEMO_BUSINESS: Business = {
   id: DEMO_BUSINESS_ID,
   name: 'Artisan Coffee & Bakery',
   email: 'owner@artisancoffee.demo',
@@ -53,7 +53,7 @@ const INITIAL_DEMO_FEEDBACK: Feedback[] = [
   },
 ];
 
-// Helper to access LocalStorage for demo mode
+// Local Storage Accessors
 const getLocalBusinesses = (): Business[] => {
   if (typeof window === 'undefined') return [DEMO_BUSINESS];
   try {
@@ -96,6 +96,25 @@ const saveLocalFeedback = (feedback: Feedback[]) => {
 
 export const FeedbackService = {
   /**
+   * One-click Demo Sign In (Works everywhere, with or without live Supabase)
+   */
+  async signInDemo(): Promise<{ success: boolean; business: Business }> {
+    const biz = DEMO_BUSINESS;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(
+        'prowetok_current_session',
+        JSON.stringify({
+          id: 'user_' + biz.id,
+          email: biz.email,
+          businessId: biz.id,
+          businessName: biz.name,
+        })
+      );
+    }
+    return { success: true, business: biz };
+  },
+
+  /**
    * Get Business details by ID (Public & Private)
    */
   async getBusinessById(businessId: string): Promise<Business | null> {
@@ -106,7 +125,7 @@ export const FeedbackService = {
           .from('businesses')
           .select('*')
           .eq('id', businessId)
-          .single();
+          .maybeSingle();
 
         if (!error && data) return data as Business;
       } catch (err) {
@@ -123,47 +142,97 @@ export const FeedbackService = {
    * Get current authenticated user's business profile
    */
   async getCurrentBusiness(): Promise<{ business: Business | null; userEmail: string | null }> {
+    // 1. Try Supabase Auth if configured
     if (isSupabaseConfigured()) {
       try {
         const supabase = createClient();
         const { data: { user } } = await supabase.auth.getUser();
-        if (!user) return { business: null, userEmail: null };
 
-        const { data: business } = await supabase
-          .from('businesses')
-          .select('*')
-          .eq('user_id', user.id)
-          .single();
-
-        if (business) {
-          return { business: business as Business, userEmail: user.email || null };
-        }
-
-        // If trigger didn't run or table empty, try to create or match by email
-        if (user.email) {
-          const { data: fallbackBiz } = await supabase
+        if (user) {
+          // Look up in businesses table
+          const { data: business } = await supabase
             .from('businesses')
             .select('*')
-            .eq('email', user.email)
-            .single();
+            .eq('user_id', user.id)
+            .maybeSingle();
 
-          if (fallbackBiz) {
-            return { business: fallbackBiz as Business, userEmail: user.email };
+          if (business) {
+            return { business: business as Business, userEmail: user.email || null };
           }
+
+          // Try match by email
+          if (user.email) {
+            const { data: fallbackBiz } = await supabase
+              .from('businesses')
+              .select('*')
+              .eq('email', user.email)
+              .maybeSingle();
+
+            if (fallbackBiz) {
+              return { business: fallbackBiz as Business, userEmail: user.email || null };
+            }
+          }
+
+          // If no record exists yet, automatically create one so dashboard never fails
+          const bizName =
+            user.user_metadata?.business_name ||
+            (user.email ? user.email.split('@')[0] : 'My Business');
+
+          try {
+            const { data: createdBiz, error: createErr } = await supabase
+              .from('businesses')
+              .insert({
+                user_id: user.id,
+                name: bizName,
+                email: user.email || 'owner@business.com',
+              })
+              .select()
+              .single();
+
+            if (!createErr && createdBiz) {
+              return { business: createdBiz as Business, userEmail: user.email || null };
+            }
+          } catch {
+            // RLS might prevent direct insert if policy not yet applied
+          }
+
+          // Resilient fallback for authenticated user
+          return {
+            business: {
+              id: user.id,
+              user_id: user.id,
+              name: bizName,
+              email: user.email || 'owner@business.com',
+              created_at: user.created_at || new Date().toISOString(),
+            },
+            userEmail: user.email || null,
+          };
         }
       } catch (err) {
         console.warn('Error fetching Supabase business, checking demo session:', err);
       }
     }
 
-    // Demo Session check
+    // 2. Demo Session check from LocalStorage
     if (typeof window !== 'undefined') {
-      const demoSession = localStorage.getItem('prowetok_current_session') || localStorage.getItem('quickfeedback_current_session');
+      const demoSession =
+        localStorage.getItem('prowetok_current_session') ||
+        localStorage.getItem('quickfeedback_current_session');
+
       if (demoSession) {
-        const session = JSON.parse(demoSession);
-        const businesses = getLocalBusinesses();
-        const biz = businesses.find((b) => b.id === session.businessId) || DEMO_BUSINESS;
-        return { business: biz, userEmail: session.email };
+        try {
+          const session = JSON.parse(demoSession);
+          const businesses = getLocalBusinesses();
+          const biz = businesses.find((b) => b.id === session.businessId) || {
+            id: session.businessId || DEMO_BUSINESS_ID,
+            name: session.businessName || DEMO_BUSINESS.name,
+            email: session.email || DEMO_BUSINESS.email,
+            created_at: new Date().toISOString(),
+          };
+          return { business: biz, userEmail: session.email };
+        } catch {
+          // ignore corrupted local storage
+        }
       }
     }
 
@@ -173,7 +242,11 @@ export const FeedbackService = {
   /**
    * Register a new business owner
    */
-  async signUp(email: string, password: string, businessName: string): Promise<{ success: boolean; business?: Business; error?: string }> {
+  async signUp(
+    email: string,
+    password: string,
+    businessName: string
+  ): Promise<{ success: boolean; business?: Business; error?: string; requiresEmailConfirmation?: boolean }> {
     if (isSupabaseConfigured()) {
       try {
         const supabase = createClient();
@@ -188,17 +261,25 @@ export const FeedbackService = {
         });
 
         if (error) throw error;
+
         if (data.user) {
-          // Verify if row was inserted into businesses table
+          // If Supabase has email confirmation enabled and session is not returned
+          if (!data.session) {
+            return {
+              success: true,
+              requiresEmailConfirmation: true,
+            };
+          }
+
+          // User is authenticated immediately -> Create or verify business row
           let { data: biz } = await supabase
             .from('businesses')
             .select('*')
             .eq('user_id', data.user.id)
-            .single();
+            .maybeSingle();
 
           if (!biz) {
-            // Manual insertion in case trigger is not yet installed in Supabase
-            const { data: newBiz, error: insertError } = await supabase
+            const { data: newBiz } = await supabase
               .from('businesses')
               .insert({
                 user_id: data.user.id,
@@ -208,15 +289,20 @@ export const FeedbackService = {
               .select()
               .single();
 
-            if (!insertError && newBiz) {
+            if (newBiz) {
               biz = newBiz;
             }
           }
 
-          if (biz) {
-            return { success: true, business: biz as Business };
-          }
-          return { success: true };
+          const resolvedBiz = biz || {
+            id: data.user.id,
+            user_id: data.user.id,
+            name: businessName,
+            email: email,
+            created_at: new Date().toISOString(),
+          };
+
+          return { success: true, business: resolvedBiz as Business };
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Registration failed';
@@ -256,6 +342,11 @@ export const FeedbackService = {
    * Log in business owner
    */
   async signIn(email: string, password?: string): Promise<{ success: boolean; business?: Business; error?: string }> {
+    // If logging in with demo account, direct to demo mode
+    if (email.toLowerCase() === 'owner@artisancoffee.demo') {
+      return this.signInDemo();
+    }
+
     if (isSupabaseConfigured() && password) {
       try {
         const supabase = createClient();
@@ -265,17 +356,27 @@ export const FeedbackService = {
         });
 
         if (error) throw error;
+
         if (data.user) {
           const { data: biz } = await supabase
             .from('businesses')
             .select('*')
             .eq('user_id', data.user.id)
-            .single();
+            .maybeSingle();
 
           if (biz) {
             return { success: true, business: biz as Business };
           }
-          return { success: true };
+
+          const fallbackBiz: Business = {
+            id: data.user.id,
+            user_id: data.user.id,
+            name: data.user.user_metadata?.business_name || (data.user.email ? data.user.email.split('@')[0] : 'My Business'),
+            email: data.user.email || email,
+            created_at: data.user.created_at || new Date().toISOString(),
+          };
+
+          return { success: true, business: fallbackBiz };
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Sign in failed';
@@ -283,12 +384,11 @@ export const FeedbackService = {
       }
     }
 
-    // Demo Mode Sign In
+    // Local / Demo Mode Sign In
     const businesses = getLocalBusinesses();
     let biz = businesses.find((b) => b.email.toLowerCase() === email.toLowerCase());
 
     if (!biz) {
-      // Default to demo coffee shop if logging in with demo account
       biz = DEMO_BUSINESS;
     }
 
@@ -350,21 +450,25 @@ export const FeedbackService = {
     if (index !== -1) {
       businesses[index].name = newName;
       saveLocalBusinesses(businesses);
+    }
 
-      // update current session if matched
-      if (typeof window !== 'undefined') {
-        const session = localStorage.getItem('prowetok_current_session') || localStorage.getItem('quickfeedback_current_session');
-        if (session) {
+    if (typeof window !== 'undefined') {
+      const session =
+        localStorage.getItem('prowetok_current_session') ||
+        localStorage.getItem('quickfeedback_current_session');
+      if (session) {
+        try {
           const parsed = JSON.parse(session);
           if (parsed.businessId === businessId) {
             parsed.businessName = newName;
             localStorage.setItem('prowetok_current_session', JSON.stringify(parsed));
           }
+        } catch {
+          // ignore
         }
       }
-      return true;
     }
-    return false;
+    return true;
   },
 
   /**
@@ -386,8 +490,8 @@ export const FeedbackService = {
           comment: data.comment?.trim() || null,
         });
 
-        if (error) throw error;
-        return { success: true };
+        if (!error) return { success: true };
+        console.warn('Supabase insert error, saving to local fallback:', error.message);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Failed to submit feedback';
         console.warn('Supabase submission failed, recording locally:', message);
