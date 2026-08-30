@@ -149,7 +149,9 @@ export const FeedbackService = {
         const { data: { user } } = await supabase.auth.getUser();
 
         if (user) {
-          // Look up in businesses table
+          const userEmail = user.email ? user.email.trim().toLowerCase() : null;
+
+          // Look up in businesses table by user_id
           const { data: business } = await supabase
             .from('businesses')
             .select('*')
@@ -157,26 +159,53 @@ export const FeedbackService = {
             .maybeSingle();
 
           if (business) {
-            return { business: business as Business, userEmail: user.email || null };
+            // Update session cache
+            if (typeof window !== 'undefined') {
+              localStorage.setItem(
+                'prowetok_current_session',
+                JSON.stringify({
+                  id: 'user_' + user.id,
+                  email: userEmail || business.email,
+                  businessId: business.id,
+                  businessName: business.name,
+                })
+              );
+            }
+            return { business: business as Business, userEmail: userEmail || business.email };
           }
 
           // Try match by email
-          if (user.email) {
+          if (userEmail) {
             const { data: fallbackBiz } = await supabase
               .from('businesses')
               .select('*')
-              .eq('email', user.email)
+              .eq('email', userEmail)
               .maybeSingle();
 
             if (fallbackBiz) {
-              return { business: fallbackBiz as Business, userEmail: user.email || null };
+              // Link user_id if not set
+              if (!fallbackBiz.user_id) {
+                await supabase.from('businesses').update({ user_id: user.id }).eq('id', fallbackBiz.id);
+              }
+              if (typeof window !== 'undefined') {
+                localStorage.setItem(
+                  'prowetok_current_session',
+                  JSON.stringify({
+                    id: 'user_' + user.id,
+                    email: userEmail,
+                    businessId: fallbackBiz.id,
+                    businessName: fallbackBiz.name,
+                  })
+                );
+              }
+              return { business: fallbackBiz as Business, userEmail: userEmail };
             }
           }
 
           // If no record exists yet, automatically create one so dashboard never fails
           const bizName =
             user.user_metadata?.business_name ||
-            (user.email ? user.email.split('@')[0] : 'My Business');
+            (userEmail ? userEmail.split('@')[0] : 'My Business');
 
           try {
             const { data: createdBiz, error: createErr } = await supabase
@@ -184,28 +213,53 @@ export const FeedbackService = {
               .insert({
                 user_id: user.id,
                 name: bizName,
-                email: user.email || 'owner@business.com',
+                email: userEmail || 'owner@business.com',
               })
               .select()
               .single();
 
             if (!createErr && createdBiz) {
-              return { business: createdBiz as Business, userEmail: user.email || null };
+              if (typeof window !== 'undefined') {
+                localStorage.setItem(
+                  'prowetok_current_session',
+                  JSON.stringify({
+                    id: 'user_' + user.id,
+                    email: userEmail || createdBiz.email,
+                    businessId: createdBiz.id,
+                    businessName: createdBiz.name,
+                  })
+                );
+              }
+              return { business: createdBiz as Business, userEmail: userEmail || createdBiz.email };
             }
           } catch {
             // RLS might prevent direct insert if policy not yet applied
           }
 
           // Resilient fallback for authenticated user
+          const tempBiz: Business = {
+            id: user.id,
+            user_id: user.id,
+            name: bizName,
+            email: userEmail || 'owner@business.com',
+            created_at: user.created_at || new Date().toISOString(),
+          };
+
+          if (typeof window !== 'undefined') {
+            localStorage.setItem(
+              'prowetok_current_session',
+              JSON.stringify({
+                id: 'user_' + user.id,
+                email: userEmail || tempBiz.email,
+                businessId: tempBiz.id,
+                businessName: tempBiz.name,
+              })
+            );
+          }
+
           return {
-            business: {
-              id: user.id,
-              user_id: user.id,
-              name: bizName,
-              email: user.email || 'owner@business.com',
-              created_at: user.created_at || new Date().toISOString(),
-            },
-            userEmail: user.email || null,
+            business: tempBiz,
+            userEmail: userEmail,
           };
         }
       } catch (err) {
@@ -247,20 +301,25 @@ export const FeedbackService = {
     password: string,
     businessName: string
   ): Promise<{ success: boolean; business?: Business; error?: string; requiresEmailConfirmation?: boolean }> {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanName = businessName.trim();
+
     if (isSupabaseConfigured()) {
       try {
         const supabase = createClient();
         const { data, error } = await supabase.auth.signUp({
-          email,
+          email: cleanEmail,
           password,
           options: {
             data: {
-              business_name: businessName,
+              business_name: cleanName,
             },
           },
         });
 
-        if (error) throw error;
+        if (error) {
+          return { success: false, error: error.message };
+        }
 
         if (data.user) {
           // If Supabase has email confirmation enabled and session is not returned
@@ -283,8 +342,8 @@ export const FeedbackService = {
               .from('businesses')
               .insert({
                 user_id: data.user.id,
-                name: businessName,
-                email: email,
+                name: cleanName,
+                email: cleanEmail,
               })
               .select()
               .single();
@@ -297,10 +356,22 @@ export const FeedbackService = {
           const resolvedBiz = biz || {
             id: data.user.id,
             user_id: data.user.id,
-            name: businessName,
-            email: email,
+            name: cleanName,
+            email: cleanEmail,
             created_at: new Date().toISOString(),
           };
+
+          if (typeof window !== 'undefined') {
+            localStorage.setItem(
+              'prowetok_current_session',
+              JSON.stringify({
+                id: 'user_' + data.user.id,
+                email: cleanEmail,
+                businessId: resolvedBiz.id,
+                businessName: resolvedBiz.name,
+              })
+            );
+          }
 
           return { success: true, business: resolvedBiz as Business };
         }
@@ -314,8 +385,8 @@ export const FeedbackService = {
     const newBizId = 'biz_' + Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
     const newBusiness: Business = {
       id: newBizId,
-      name: businessName,
-      email: email,
+      name: cleanName,
+      email: cleanEmail,
       created_at: new Date().toISOString(),
     };
 
@@ -328,9 +399,9 @@ export const FeedbackService = {
         'prowetok_current_session',
         JSON.stringify({
           id: 'user_' + newBizId,
-          email: email,
+          email: cleanEmail,
           businessId: newBizId,
-          businessName: businessName,
+          businessName: cleanName,
         })
       );
     }
@@ -342,8 +413,10 @@ export const FeedbackService = {
    * Log in business owner
    */
   async signIn(email: string, password?: string): Promise<{ success: boolean; business?: Business; error?: string }> {
+    const cleanEmail = email.trim().toLowerCase();
+
     // If logging in with demo account, direct to demo mode
-    if (email.toLowerCase() === 'owner@artisancoffee.demo') {
+    if (cleanEmail === 'owner@artisancoffee.demo') {
       return this.signInDemo();
     }
 
@@ -351,32 +424,57 @@ export const FeedbackService = {
       try {
         const supabase = createClient();
         const { data, error } = await supabase.auth.signInWithPassword({
-          email,
+          email: cleanEmail,
           password,
         });
 
-        if (error) throw error;
+        if (error) {
+          const msg = error.message;
+          if (msg.toLowerCase().includes('email not confirmed')) {
+            return {
+              success: false,
+              error: 'Please confirm your email address before signing in. Check your inbox (or spam) for the confirmation link.',
+            };
+          }
+          if (msg.toLowerCase().includes('invalid login credentials')) {
+            return {
+              success: false,
+              error: 'Invalid email or password. If you registered previously in Demo Mode or before connecting Supabase, please create a new business account.',
+            };
+          }
+          return { success: false, error: msg };
+        }
 
         if (data.user) {
+          const userEmail = data.user.email ? data.user.email.trim().toLowerCase() : cleanEmail;
+
           const { data: biz } = await supabase
             .from('businesses')
             .select('*')
             .eq('user_id', data.user.id)
             .maybeSingle();
 
-          if (biz) {
-            return { success: true, business: biz as Business };
-          }
-
-          const fallbackBiz: Business = {
+          const resolvedBiz: Business = biz || {
             id: data.user.id,
             user_id: data.user.id,
-            name: data.user.user_metadata?.business_name || (data.user.email ? data.user.email.split('@')[0] : 'My Business'),
-            email: data.user.email || email,
+            name: data.user.user_metadata?.business_name || (userEmail ? userEmail.split('@')[0] : 'My Business'),
+            email: userEmail,
             created_at: data.user.created_at || new Date().toISOString(),
           };
 
-          return { success: true, business: fallbackBiz };
+          if (typeof window !== 'undefined') {
+            localStorage.setItem(
+              'prowetok_current_session',
+              JSON.stringify({
+                id: 'user_' + data.user.id,
+                email: userEmail,
+                businessId: resolvedBiz.id,
+                businessName: resolvedBiz.name,
+              })
+            );
+          }
+
+          return { success: true, business: resolvedBiz };
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Sign in failed';
@@ -386,7 +484,7 @@ export const FeedbackService = {
 
     // Local / Demo Mode Sign In
     const businesses = getLocalBusinesses();
-    let biz = businesses.find((b) => b.email.toLowerCase() === email.toLowerCase());
+    let biz = businesses.find((b) => b.email.toLowerCase() === cleanEmail);
 
     if (!biz) {
       biz = DEMO_BUSINESS;
@@ -430,12 +528,13 @@ export const FeedbackService = {
    * Update Business Profile Name
    */
   async updateBusinessName(businessId: string, newName: string): Promise<boolean> {
+    const cleanName = newName.trim();
     if (isSupabaseConfigured()) {
       try {
         const supabase = createClient();
         const { error } = await supabase
           .from('businesses')
-          .update({ name: newName })
+          .update({ name: cleanName })
           .eq('id', businessId);
 
         if (!error) return true;
@@ -448,7 +547,7 @@ export const FeedbackService = {
     const businesses = getLocalBusinesses();
     const index = businesses.findIndex((b) => b.id === businessId);
     if (index !== -1) {
-      businesses[index].name = newName;
+      businesses[index].name = cleanName;
       saveLocalBusinesses(businesses);
     }
 
@@ -460,7 +559,7 @@ export const FeedbackService = {
         try {
           const parsed = JSON.parse(session);
           if (parsed.businessId === businessId) {
-            parsed.businessName = newName;
+            parsed.businessName = cleanName;
             localStorage.setItem('prowetok_current_session', JSON.stringify(parsed));
           }
         } catch {
