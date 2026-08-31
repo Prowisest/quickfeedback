@@ -746,9 +746,7 @@ export const FeedbackService = {
           console.error('[PROWETOK Debug] Supabase error querying feedback (check RLS policies):', error);
         } else {
           console.log('[PROWETOK Debug] Supabase returned feedback rows count:', data?.length || 0, data);
-          if (data && data.length > 0) {
-            return data;
-          }
+          return (data as Feedback[]) || [];
         }
       } catch (err) {
         console.error('[PROWETOK Debug] Exception fetching feedback from Supabase:', err);
