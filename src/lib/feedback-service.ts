@@ -150,16 +150,24 @@ export const FeedbackService = {
 
         if (user) {
           const userEmail = user.email ? user.email.trim().toLowerCase() : null;
+          console.log('[PROWETOK Debug] Supabase Auth User detected:', {
+            userId: user.id,
+            email: userEmail,
+          });
 
           // Look up in businesses table by user_id
-          const { data: business } = await supabase
+          let { data: business, error: bizErr } = await supabase
             .from('businesses')
             .select('*')
             .eq('user_id', user.id)
             .maybeSingle();
 
+          if (bizErr) {
+            console.warn('[PROWETOK Debug] Error querying businesses by user_id:', bizErr);
+          }
+
           if (business) {
-            // Update session cache
+            console.log('[PROWETOK Debug] Found business record by user_id:', business);
             if (typeof window !== 'undefined') {
               localStorage.setItem(
                 'prowetok_current_session',
@@ -183,9 +191,12 @@ export const FeedbackService = {
               .maybeSingle();
 
             if (fallbackBiz) {
-              // Link user_id if not set
-              if (!fallbackBiz.user_id) {
+              console.log('[PROWETOK Debug] Found business record by email:', fallbackBiz);
+              // Link user_id if not set or mismatched
+              if (fallbackBiz.user_id !== user.id) {
+                console.log('[PROWETOK Debug] Linking user_id to business record...');
                 await supabase.from('businesses').update({ user_id: user.id }).eq('id', fallbackBiz.id);
+                fallbackBiz.user_id = user.id;
               }
               if (typeof window !== 'undefined') {
                 localStorage.setItem(
@@ -207,6 +218,8 @@ export const FeedbackService = {
             user.user_metadata?.business_name ||
             (userEmail ? userEmail.split('@')[0] : 'My Business');
 
+          console.log('[PROWETOK Debug] No existing business found, auto-provisioning new record for:', bizName);
+
           try {
             const { data: createdBiz, error: createErr } = await supabase
               .from('businesses')
@@ -219,6 +232,7 @@ export const FeedbackService = {
               .single();
 
             if (!createErr && createdBiz) {
+              console.log('[PROWETOK Debug] Successfully auto-provisioned business:', createdBiz);
               if (typeof window !== 'undefined') {
                 localStorage.setItem(
                   'prowetok_current_session',
@@ -231,9 +245,11 @@ export const FeedbackService = {
                 );
               }
               return { business: createdBiz as Business, userEmail: userEmail || createdBiz.email };
+            } else if (createErr) {
+              console.warn('[PROWETOK Debug] Auto-provision insert error (RLS check):', createErr);
             }
-          } catch {
-            // RLS might prevent direct insert if policy not yet applied
+          } catch (insertErr) {
+            console.warn('[PROWETOK Debug] Insert exception:', insertErr);
           }
 
           // Resilient fallback for authenticated user
@@ -257,13 +273,14 @@ export const FeedbackService = {
             );
           }
 
+          console.log('[PROWETOK Debug] Using temporary business session fallback:', tempBiz);
           return {
             business: tempBiz,
             userEmail: userEmail,
           };
         }
       } catch (err) {
-        console.warn('Error fetching Supabase business, checking demo session:', err);
+        console.warn('[PROWETOK Debug] Error fetching Supabase business, checking demo session:', err);
       }
     }
 
@@ -670,27 +687,81 @@ export const FeedbackService = {
   /**
    * Get all feedback submissions for a business (Newest first)
    */
-  async getFeedbackForBusiness(businessId: string): Promise<Feedback[]> {
+  async getFeedbackForBusiness(businessId: string, userId?: string): Promise<Feedback[]> {
     if (isSupabaseConfigured()) {
       try {
         const supabase = createClient();
-        const { data, error } = await supabase
-          .from('feedback')
-          .select('*')
-          .eq('business_id', businessId)
-          .order('created_at', { ascending: false });
 
-        if (!error && data) {
-          return data as Feedback[];
+        // Collect all potential matching business IDs
+        const idsToQuery = new Set<string>();
+        if (businessId) idsToQuery.add(businessId);
+        if (userId) idsToQuery.add(userId);
+
+        // Fetch any business records in DB linked to this user_id
+        if (userId) {
+          try {
+            const { data: userBizList } = await supabase
+              .from('businesses')
+              .select('id, user_id')
+              .eq('user_id', userId);
+
+            if (userBizList) {
+              userBizList.forEach((b) => {
+                if (b.id) idsToQuery.add(b.id);
+              });
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        const targetIds = Array.from(idsToQuery);
+        console.log('[PROWETOK Debug] Querying Supabase feedback table for business_ids:', targetIds, {
+          businessId,
+          userId,
+        });
+
+        let data: Feedback[] | null = null;
+        let error: unknown = null;
+
+        if (targetIds.length === 1) {
+          const res = await supabase
+            .from('feedback')
+            .select('*')
+            .eq('business_id', targetIds[0])
+            .order('created_at', { ascending: false });
+          data = res.data as Feedback[] | null;
+          error = res.error;
+        } else if (targetIds.length > 1) {
+          const res = await supabase
+            .from('feedback')
+            .select('*')
+            .in('business_id', targetIds)
+            .order('created_at', { ascending: false });
+          data = res.data as Feedback[] | null;
+          error = res.error;
+        }
+
+        if (error) {
+          console.error('[PROWETOK Debug] Supabase error querying feedback (check RLS policies):', error);
+        } else {
+          console.log('[PROWETOK Debug] Supabase returned feedback rows count:', data?.length || 0, data);
+          if (data && data.length > 0) {
+            return data;
+          }
         }
       } catch (err) {
-        console.warn('Error fetching feedback from Supabase:', err);
+        console.error('[PROWETOK Debug] Exception fetching feedback from Supabase:', err);
       }
     }
 
     // Local / Demo storage fallback
     const allFeedback = getLocalFeedback();
-    return allFeedback.filter((f) => f.business_id === businessId);
+    const filtered = allFeedback.filter(
+      (f) => f.business_id === businessId || (userId && f.business_id === userId)
+    );
+    console.log('[PROWETOK Debug] Returning fallback local feedback:', filtered.length, 'items');
+    return filtered;
   },
 
   /**

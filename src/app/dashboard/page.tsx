@@ -56,10 +56,18 @@ export default function DashboardPage() {
     if (isManualRefresh) setRefreshing(true);
 
     try {
+      console.log('[PROWETOK Dashboard] Resolving current business owner profile...');
       const { business: currentBiz, userEmail: email } = await FeedbackService.getCurrentBusiness();
 
+      console.log('[PROWETOK Dashboard] Resolved business:', {
+        businessId: currentBiz?.id,
+        userId: currentBiz?.user_id,
+        name: currentBiz?.name,
+        userEmail: email,
+      });
+
       if (!currentBiz) {
-        // Not logged in -> redirect to login
+        console.warn('[PROWETOK Dashboard] No active session or business profile found. Redirecting to /login');
         router.push('/login');
         return;
       }
@@ -68,11 +76,14 @@ export default function DashboardPage() {
       setUserEmail(email);
       setNewName(currentBiz.name);
 
-      const items = await FeedbackService.getFeedbackForBusiness(currentBiz.id);
+      console.log('[PROWETOK Dashboard] Fetching feedback submissions for business ID:', currentBiz.id, 'and user ID:', currentBiz.user_id);
+      const items = await FeedbackService.getFeedbackForBusiness(currentBiz.id, currentBiz.user_id);
+      console.log('[PROWETOK Dashboard] Feedback items loaded into state:', items.length, items);
+
       setFeedbackList(items);
       setStats(FeedbackService.calculateStats(items));
     } catch (err) {
-      console.error('Error loading dashboard:', err);
+      console.error('[PROWETOK Dashboard] Error loading dashboard data:', err);
     } finally {
       setLoading(false);
       if (isManualRefresh) setRefreshing(false);

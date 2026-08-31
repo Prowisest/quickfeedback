@@ -96,10 +96,21 @@ CREATE POLICY "Business owners can view their feedback"
     FOR SELECT
     TO authenticated
     USING (
+        -- Match through businesses table user_id
         EXISTS (
             SELECT 1 FROM public.businesses
             WHERE public.businesses.id = feedback.business_id
             AND public.businesses.user_id = auth.uid()
+        )
+        OR
+        -- Match if feedback.business_id was stored as user's auth UID
+        feedback.business_id = auth.uid()
+        OR
+        -- Match by email if user_id was pending link
+        EXISTS (
+            SELECT 1 FROM public.businesses
+            WHERE public.businesses.id = feedback.business_id
+            AND public.businesses.email = (auth.jwt() ->> 'email')
         )
     );
 
@@ -115,6 +126,8 @@ CREATE POLICY "Business owners can delete their feedback"
             WHERE public.businesses.id = feedback.business_id
             AND public.businesses.user_id = auth.uid()
         )
+        OR
+        feedback.business_id = auth.uid()
     );
 
 -- ============================================================
