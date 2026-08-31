@@ -6,7 +6,8 @@ PROWETOK is a mobile-first customer feedback collection application designed spe
 
 ## ✨ Features
 
-- 🔐 **Supabase Auth & PostgreSQL Schema**: Business owners sign up and sign in using email and password.
+- 🔐 **Supabase Auth & PostgreSQL Schema**: Business owners sign up, sign in, and reset forgotten passwords securely using Supabase Auth.
+- 🔑 **Forgot & Reset Password Flow**: Complete password recovery flow with email reset links and a dedicated `/reset-password` page.
 - 📱 **Mobile-First Public Feedback Form** (`/feedback/[business-id]`):
   - No customer login or app download required.
   - Interactive 1-5 star ratings with hover/touch animations and feeling descriptions.
@@ -59,7 +60,17 @@ npm install
    NEXT_PUBLIC_APP_URL=http://localhost:3000
    ```
 
-### 3. Run Development Server
+### 3. Configure Supabase Password Reset Redirect URLs & Email Template
+To enable the **Forgot Password** flow on your deployed app and localhost:
+1. In your **Supabase Dashboard** → **Authentication** → **URL Configuration**:
+   - **Site URL**: `https://your-domain.vercel.app` (or `http://localhost:3000`)
+   - **Redirect URLs**: Add:
+     - `http://localhost:3000/reset-password`
+     - `https://your-domain.vercel.app/reset-password`
+2. In **Authentication** → **Email Templates** → **Reset Password**:
+   - Verify the message body contains the reset link: `{{ .ConfirmationURL }}`
+
+### 4. Run Development Server
 ```bash
 npm run dev
 ```
@@ -79,6 +90,8 @@ quickfeedback/
 │   │   ├── layout.tsx             # App shell layout & metadata (PROWETOK)
 │   │   ├── page.tsx               # Landing page with interactive preview & features
 │   │   ├── login/page.tsx         # Business owner login + 1-click demo preview
+│   │   ├── forgot-password/page.tsx # Password reset request page
+│   │   ├── reset-password/page.tsx  # New password setup page
 │   │   ├── signup/page.tsx        # Business owner registration
 │   │   ├── dashboard/page.tsx     # Owner analytics, QR code card, feedback feed
 │   │   └── feedback/[businessId]/ # Mobile-first customer feedback form

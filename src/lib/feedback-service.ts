@@ -525,6 +525,60 @@ export const FeedbackService = {
   },
 
   /**
+   * Send Password Reset Email (Supabase Auth)
+   */
+  async sendPasswordResetEmail(email: string, redirectTo?: string): Promise<{ success: boolean; error?: string }> {
+    const cleanEmail = email.trim().toLowerCase();
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createClient();
+        const origin =
+          typeof window !== 'undefined'
+            ? window.location.origin
+            : process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+        const redirectUrl = redirectTo || `${origin}/reset-password`;
+
+        const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+          redirectTo: redirectUrl,
+        });
+
+        if (error) throw error;
+        return { success: true };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to send password reset email';
+        return { success: false, error: message };
+      }
+    }
+
+    // Demo Mode simulation
+    return { success: true };
+  },
+
+  /**
+   * Update User Password (Used after password reset token/session is verified)
+   */
+  async updatePassword(newPassword: string): Promise<{ success: boolean; error?: string }> {
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createClient();
+        const { error } = await supabase.auth.updateUser({
+          password: newPassword,
+        });
+
+        if (error) throw error;
+        return { success: true };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to update password';
+        return { success: false, error: message };
+      }
+    }
+
+    // Demo Mode simulation
+    return { success: true };
+  },
+
+  /**
    * Update Business Profile Name
    */
   async updateBusinessName(businessId: string, newName: string): Promise<boolean> {
